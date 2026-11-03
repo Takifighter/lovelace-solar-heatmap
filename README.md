@@ -4,7 +4,7 @@ A Home Assistant dashboard card that shows your solar (PV) energy yield as a hea
 
 > Ein Heatmap-Karte für Home Assistant, die den Solarertrag pro Stunde, Tag, Woche, Monat oder Jahr zeigt. Ein Schieberegler blendet alles unter einem Mindestwert aus, damit die besten Tage sofort auffallen. Deutsche Anleitung weiter unten.
 
-![Daily view](images/daily.png)
+![Daily view](https://raw.githubusercontent.com/Takifighter/lovelace-solar-heatmap/main/images/daily.png)
 
 ## Features
 
