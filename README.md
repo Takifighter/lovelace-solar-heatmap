@@ -17,7 +17,7 @@ A Home Assistant dashboard card that shows your solar (PV) energy yield as a hea
 - Visual editor, everything also configurable in YAML
 - Base colour freely selectable
 
-> **Note:** The card's interface text is currently German only.
+> **Language:** The card is available in English and German. It follows the language of your Home Assistant and can be overridden with the `language` option.
 
 ## Views
 
@@ -72,6 +72,7 @@ view: daily
 | `stat` | `auto` | `auto`, `change`, `max`, `mean`, `sum` — see below |
 | `newest_first` | `false` | Newest row on top |
 | `show_view_select` | `true` | Show the view dropdown in the card |
+| `language` | `auto` | `auto` (Home Assistant language), `en` or `de` |
 
 ### The `stat` option
 
