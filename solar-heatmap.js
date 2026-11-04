@@ -16,6 +16,17 @@ const I18N = {
     aria_view: "View",
     aria_period: "Period",
     aria_min: "Minimum value",
+    aria_max: "Maximum value",
+    pct: "{p}%",
+    c_below: "below {v}",
+    c_from: "from {v}",
+    c_upto: "up to {v}",
+    c_above: "above {v}",
+    c_between: "{lo} to {hi}",
+    of_total: "of {n} {noun}",
+    nouns: { hourly: "hours", daily: "days", weekly: "days", monthly: "months", yearly: "years" },
+    out_below: "below range",
+    out_above: "above range",
     standard: "Default",
     views: { hourly: "Hourly", daily: "Daily", weekly: "Weekly", monthly: "Monthly", yearly: "Yearly" },
     week: "Wk {n}",
@@ -61,6 +72,17 @@ const I18N = {
     aria_view: "Ansicht",
     aria_period: "Zeitraum",
     aria_min: "Mindestwert",
+    aria_max: "Höchstwert",
+    pct: "{p} %",
+    c_below: "unter {v}",
+    c_from: "ab {v}",
+    c_upto: "bis {v}",
+    c_above: "über {v}",
+    c_between: "{lo} bis {hi}",
+    of_total: "von {n} {noun}",
+    nouns: { hourly: "Stunden", daily: "Tagen", weekly: "Tagen", monthly: "Monaten", yearly: "Jahren" },
+    out_below: "unter dem Bereich",
+    out_above: "über dem Bereich",
     standard: "Standard",
     views: { hourly: "Stündlich", daily: "Täglich", weekly: "Wöchentlich", monthly: "Monatlich", yearly: "Jährlich" },
     week: "KW {n}",
@@ -167,7 +189,8 @@ class SolarHeatmap extends HTMLElement {
     this._earliest = null;
     this._earliestPromise = null;
     this._sel = "standard";
-    this._threshold = 0;
+    this._fLo = 0;
+    this._fHi = 1000;
     this._lastLoad = 0;
     if (this._hass) {
       this._build();
@@ -233,8 +256,23 @@ class SolarHeatmap extends HTMLElement {
         select { padding: 7px 10px; border-radius: 6px; font: inherit; font-size: 14px;
                  border: 1px solid var(--divider-color);
                  background: var(--card-background-color); color: var(--primary-text-color); }
-        .slider { flex: 1 1 160px; display: flex; align-items: center; gap: 10px; min-width: 0; }
-        input[type=range] { flex: 1; min-width: 0; accent-color: var(--primary-color); }
+        .slider { flex: 1 1 200px; display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .range { position: relative; flex: 1; min-width: 90px; height: 24px; }
+        .track { position: absolute; left: 0; right: 0; top: 50%; height: 4px; margin-top: -2px;
+                 border-radius: 2px; background: var(--divider-color); }
+        .fill { position: absolute; top: 0; bottom: 0; border-radius: 2px; background: var(--primary-color); }
+        .range input { position: absolute; left: 0; top: 0; width: 100%; height: 24px; margin: 0;
+                       background: none; pointer-events: none; -webkit-appearance: none; appearance: none; }
+        .range input::-webkit-slider-runnable-track { background: transparent; height: 24px; }
+        .range input::-moz-range-track { background: transparent; height: 24px; }
+        .range input::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; pointer-events: auto;
+            width: 18px; height: 18px; margin-top: 3px; border-radius: 50%; box-sizing: border-box;
+            background: var(--primary-color); border: 2px solid var(--card-background-color);
+            box-shadow: 0 0 0 1px var(--divider-color); cursor: pointer; }
+        .range input::-moz-range-thumb { pointer-events: auto; width: 18px; height: 18px; border-radius: 50%;
+            box-sizing: border-box; background: var(--primary-color);
+            border: 2px solid var(--card-background-color);
+            box-shadow: 0 0 0 1px var(--divider-color); cursor: pointer; }
         .thr { font-size: 13px; color: var(--secondary-text-color); white-space: nowrap; }
         .grid { display: grid; gap: 3px; }
         .lbl { font-size: 11px; color: var(--secondary-text-color); display: flex;
@@ -248,6 +286,7 @@ class SolarHeatmap extends HTMLElement {
         .cell.off { visibility: hidden; }
         .cell.sel { outline: 2px solid var(--primary-color); outline-offset: 1px; }
         .info.hover, .info.max { margin-top: 4px; }
+        .info.cnt { margin: -6px 0 12px; min-height: 0; }
         .cell.big { height: 56px; display: flex; align-items: center; justify-content: center;
                     font-size: 13px; font-weight: 500; }
         .info { margin-top: 12px; min-height: 18px; font-size: 13px; color: var(--secondary-text-color); }
@@ -260,10 +299,15 @@ class SolarHeatmap extends HTMLElement {
           <select class="view" aria-label="${this._t("aria_view")}"></select>
           <select class="period" aria-label="${this._t("aria_period")}"></select>
           <div class="slider">
-            <input type="range" min="0" max="1000" step="1" value="0" aria-label="${this._t("aria_min")}">
+            <div class="range">
+              <div class="track"><div class="fill"></div></div>
+              <input class="lo" type="range" min="0" max="1000" step="1" value="0" aria-label="${this._t("aria_min")}">
+              <input class="hi" type="range" min="0" max="1000" step="1" value="1000" aria-label="${this._t("aria_max")}">
+            </div>
             <span class="thr"></span>
           </div>
         </div>
+        <div class="info cnt" style="display:none"></div>
         <div class="grid"></div>
         <div class="info sum"></div>
         <div class="info max"></div>
@@ -275,7 +319,10 @@ class SolarHeatmap extends HTMLElement {
     titleEl.style.display = this._config.title ? "" : "none";
     this._viewSelect = root.querySelector("select.view");
     this._select = root.querySelector("select.period");
-    this._slider = root.querySelector("input");
+    this._loInput = root.querySelector("input.lo");
+    this._hiInput = root.querySelector("input.hi");
+    this._fill = root.querySelector(".fill");
+    this._cnt = root.querySelector(".info.cnt");
     this._thrLabel = root.querySelector(".thr");
     this._grid = root.querySelector(".grid");
     this._sumInfo = root.querySelector(".info.sum");
@@ -298,7 +345,8 @@ class SolarHeatmap extends HTMLElement {
     this._viewSelect.addEventListener("change", () => {
       this._view = this._viewSelect.value;
       this._sel = "standard";
-      this._threshold = 0;
+      this._fLo = 0;
+      this._fHi = 1000;
       this._fillSelector();
       this._load();
     });
@@ -307,14 +355,23 @@ class SolarHeatmap extends HTMLElement {
     this._earliestPromise = this._loadEarliest();
     this._select.addEventListener("change", () => {
       this._sel = this._select.value;
-      this._threshold = 0;
+      this._fLo = 0;
+      this._fHi = 1000;
       this._load();
     });
-    this._slider.addEventListener("input", () => {
-      const f = parseFloat(this._slider.value) / 1000;
-      this._threshold = f >= 1 ? this._max : f * this._max; // far right = exactly the highest value
+    const onRange = (which) => () => {
+      let lo = parseInt(this._loInput.value, 10);
+      let hi = parseInt(this._hiInput.value, 10);
+      if (which === "lo" && lo > hi) lo = hi; // handles never cross
+      if (which === "hi" && hi < lo) hi = lo;
+      this._fLo = lo;
+      this._fHi = hi;
+      this._syncRange();
       this._paint();
-    });
+    };
+    this._loInput.addEventListener("input", onRange("lo"));
+    this._hiInput.addEventListener("input", onRange("hi"));
+    this._syncRange();
 
     if (this._ro) this._ro.disconnect();
     this._ro = new ResizeObserver(() => {
@@ -618,8 +675,7 @@ class SolarHeatmap extends HTMLElement {
     }
 
     this._max = this._config.max ?? max;
-    if (this._threshold > this._max) this._threshold = 0;
-    this._slider.value = String(this._max ? Math.round((this._threshold / this._max) * 1000) : 0);
+    this._syncRange();
 
     const perKey = { daily: "day", weekly: "day", monthly: "month", yearly: "year" }[plan.view];
     const per = perKey && I18N[pickLang(this._lang())].per[perKey];
@@ -640,23 +696,61 @@ class SolarHeatmap extends HTMLElement {
   }
 
   _show(el) {
-    this._hover.textContent = `${el._tip}: ${this._fmt(el._value)}`;
+    const suf = el._pos === "below" ? ` (${this._t("out_below")})` : el._pos === "above" ? ` (${this._t("out_above")})` : "";
+    this._hover.textContent = `${el._tip}: ${this._fmt(el._value)}${suf}`;
+  }
+
+  _num(v) {
+    const d = this._config.decimals;
+    return v.toLocaleString(this._lang(), { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+
+  // Handle positions are stored as fractions 0..1000; far right = exactly the highest value
+  _bounds() {
+    const m = this._max || 0;
+    const f = (x) => (x >= 1000 ? m : (x / 1000) * m);
+    return { lo: f(this._fLo), hi: f(this._fHi) };
+  }
+
+  _syncRange() {
+    this._loInput.value = String(this._fLo);
+    this._hiInput.value = String(this._fHi);
+    const a = this._fLo / 10;
+    const b = this._fHi / 10;
+    this._fill.style.left = `calc(${a}% + ${(0.5 - a / 100) * 18}px)`;
+    this._fill.style.width = `calc(${b - a}% - ${((b - a) / 100) * 18}px)`;
+    // when both handles sit close together at the right, keep the lower one reachable
+    const loTop = this._fHi - this._fLo < 30 && this._fLo > 500;
+    this._loInput.style.zIndex = loTop ? "3" : "2";
+    this._hiInput.style.zIndex = loTop ? "2" : "3";
   }
 
   _paint() {
     if (!this._cells) return;
-    const thr = this._threshold;
-    const max = this._max;
+    const { lo, hi } = this._bounds();
+    const EPS = 1e-9;
     const base = hexToRgb(this._config.color);
-    const span = Math.max(1e-9, max - thr);
-    this._thrLabel.textContent = this._fmt(thr);
+    const span = hi - lo;
+    this._thrLabel.textContent = `${this._num(lo)} – ${this._fmt(hi)}`;
+    let below = 0;
+    let mid = 0;
+    let above = 0;
     for (const el of this._cells) {
       if (!el.classList.contains("on")) continue;
-      if (el._value < thr - 1e-9) {
+      const v = el._value;
+      if (v < lo - EPS) {
+        below++;
+        el._pos = "below";
+        el.style.background = this._config.below_color;
+      } else if (v > hi + EPS) {
+        above++;
+        el._pos = "above";
         el.style.background = this._config.below_color;
       } else {
-        const t = span <= 1e-6 ? 1 : Math.min(1, (el._value - thr) / span);
-        const f = 0.15 + 0.85 * t; // light tint -> full base colour at the highest value
+        mid++;
+        el._pos = "in";
+        const t = span <= 1e-6 ? 1 : Math.min(1, Math.max(0, (v - lo) / span));
+        const f = 0.15 + 0.85 * t; // light tint -> full base colour at the upper end
         const rgb = base.map((c) => Math.round(255 * (1 - f) + c * f));
         el.style.background = `rgb(${rgb.join(",")})`;
       }
@@ -665,6 +759,39 @@ class SolarHeatmap extends HTMLElement {
         el.style.color = 0.299 * m[0] + 0.587 * m[1] + 0.114 * m[2] > 150 ? "#000" : "#fff";
       }
     }
+    this._counts(lo, hi, below, mid, above);
+  }
+
+  _counts(lo, hi, below, mid, above) {
+    const loMoved = this._fLo > 0;
+    const hiMoved = this._fHi < 1000;
+    const total = below + mid + above;
+    if ((!loMoved && !hiMoved) || !total) {
+      this._cnt.textContent = "";
+      this._cnt.style.display = "none";
+      return;
+    }
+    const pct = (n) => {
+      const p = (n / total) * 100;
+      return this._t("pct", { p: p.toLocaleString(this._lang(), { maximumFractionDigits: p < 10 ? 1 : 0 }) });
+    };
+    const part = (label, n) => `${label}: ${n} (${pct(n)})`;
+    const parts = [];
+    if (loMoved && !hiMoved) {
+      parts.push(part(this._t("c_below", { v: this._fmt(lo) }), below));
+      parts.push(part(this._t("c_from", { v: this._fmt(lo) }), mid + above));
+    } else if (!loMoved && hiMoved) {
+      parts.push(part(this._t("c_upto", { v: this._fmt(hi) }), below + mid));
+      parts.push(part(this._t("c_above", { v: this._fmt(hi) }), above));
+    } else {
+      parts.push(part(this._t("c_below", { v: this._fmt(lo) }), below));
+      parts.push(part(this._t("c_between", { lo: this._num(lo), hi: this._fmt(hi) }), mid));
+      parts.push(part(this._t("c_above", { v: this._fmt(hi) }), above));
+    }
+    const noun = I18N[pickLang(this._lang())].nouns[this._plan.view];
+    parts.push(this._t("of_total", { n: total, noun }));
+    this._cnt.textContent = parts.join(" · ");
+    this._cnt.style.display = "";
   }
 }
 
