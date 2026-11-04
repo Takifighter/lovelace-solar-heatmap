@@ -10,7 +10,8 @@ A Home Assistant dashboard card that shows your solar (PV) energy yield as a hea
 
 - Five views: hourly, daily, weekly, monthly, yearly
 - The highest value is always the darkest colour
-- Slider for a minimum value: everything below turns white
+- Range slider with two handles: only cells inside the range are coloured, everything else turns white
+- Counts and percentages of cells below, within and above the range
 - Period dropdown that only offers years / months for which data exists
 - Summary under the grid: total, average and best value
 - Click or hover a cell for its date and value
