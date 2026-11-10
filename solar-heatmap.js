@@ -1,6 +1,6 @@
 /* solar-heatmap.js
- * Solar yield heatmap for Home Assistant dashboards
- * Karte:  custom:solar-heatmap
+ * Calendar heatmap for cumulative meters (solar, electricity, gas, water) in Home Assistant
+ * Card:   custom:solar-heatmap
  * Views: hourly | daily | weekly | monthly | yearly
  */
 
@@ -39,8 +39,10 @@ const I18N = {
     no_stats: '<span class="err">No statistics found.</span> Check Developer tools → Statistics to see whether the entity is listed.',
     max_line: "Highest value: {v} ({tip})",
     no_values: "No values in the selected period.",
+    no_price: "No price available for the cost view.",
+    mode_hint: "Cost = consumption × price per unit (energy cost only, without base fee)",
     labels: {
-      entity: "Entity (continuously increasing energy sensor)",
+      entity: "Entity (cumulative meter)",
       title: "Title",
       view: "View on open",
       show_view_select: "Show view selector in the card",
@@ -48,6 +50,9 @@ const I18N = {
       color: "Base colour",
       decimals: "Decimal places",
       unit: "Unit (empty = automatic)",
+      price_entity: "Price entity for the cost view (optional)",
+      show_tooltip: "Show floating tooltip at the mouse",
+      currency: "Currency symbol (empty = from price entity)",
       rows: "Number of rows in the default view (empty = automatic)",
       stat: "Value per period",
       newest_first: "Newest row on top",
@@ -65,7 +70,7 @@ const I18N = {
       sum: "Sum",
       lang_auto: "Automatic (Home Assistant language)",
     },
-    card_desc: "Solar yield as a heatmap (hourly, daily, weekly, monthly, yearly) with a minimum-value slider",
+    card_desc: "Heatmap for cumulative meters (solar, electricity, gas, water): hourly to yearly, with range slider and cost view",
   },
   de: {
     need_entity: "Bitte eine Entität (entity) angeben.",
@@ -95,8 +100,10 @@ const I18N = {
     no_stats: '<span class="err">Keine Statistikdaten gefunden.</span> Prüfe unter Entwicklerwerkzeuge → Statistiken, ob die Entität dort steht.',
     max_line: "Höchster Wert: {v} ({tip})",
     no_values: "Keine Werte im gewählten Zeitraum.",
+    no_price: "Kein Preis für die Kostenansicht verfügbar.",
+    mode_hint: "Kosten = Verbrauch × Preis pro Einheit (nur Arbeitskosten, ohne Grundgebühr)",
     labels: {
-      entity: "Entität (fortlaufender Energiesensor)",
+      entity: "Entität (fortlaufender Zähler)",
       title: "Titel",
       view: "Ansicht beim Öffnen",
       show_view_select: "Ansichts-Auswahl in der Karte anzeigen",
@@ -104,6 +111,9 @@ const I18N = {
       color: "Grundfarbe",
       decimals: "Nachkommastellen",
       unit: "Einheit (leer = automatisch)",
+      price_entity: "Preis-Entität für die Kostenansicht (optional)",
+      show_tooltip: "Schwebeanzeige an der Maus anzeigen",
+      currency: "Währungszeichen (leer = aus der Preis-Entität)",
       rows: "Anzahl Zeilen in der Standard-Ansicht (leer = automatisch)",
       stat: "Wert pro Zeitraum",
       newest_first: "Neueste Zeile oben",
@@ -121,7 +131,7 @@ const I18N = {
       sum: "Summe",
       lang_auto: "Automatisch (Sprache von Home Assistant)",
     },
-    card_desc: "Solarertrag als Heatmap (stündlich, täglich, wöchentlich, monatlich, jährlich) mit Mindestwert-Regler",
+    card_desc: "Heatmap für fortlaufende Zähler (Solar, Strom, Gas, Wasser): stündlich bis jährlich, mit Bereichsregler und Kostenansicht",
   },
 };
 
@@ -170,7 +180,7 @@ function rgbToHex(rgb) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Karte                                                               */
+/* Card                                                                */
 /* ------------------------------------------------------------------ */
 class SolarHeatmap extends HTMLElement {
   setConfig(config) {
@@ -186,6 +196,8 @@ class SolarHeatmap extends HTMLElement {
       ...config,
     };
     this._view = this._config.view;
+    this._mode = "kwh";
+    this._costOk = false;
     this._earliest = null;
     this._earliestPromise = null;
     this._sel = "standard";
@@ -216,11 +228,11 @@ class SolarHeatmap extends HTMLElement {
   }
 
   static getStubConfig(hass) {
-    const e = hass && Object.keys(hass.states).find((k) => k.startsWith("sensor.") && /solar|pv/.test(k));
-    return { entity: e || "sensor.solar_gesamt_momentanleistung_output_riemann", title: "Solarertrag", view: "daily" };
+    const e = hass && Object.keys(hass.states).find((k) => k.startsWith("sensor.") && /energy|solar|pv|gas|water/.test(k));
+    return { entity: e || "sensor.energy_total", title: "Heatmap", view: "daily" };
   }
 
-  /* ---------- Hilfen ---------- */
+  /* ---------- Helpers ---------- */
   _lang() {
     const l = this._config?.language;
     if (l && l !== "auto") return l;
@@ -232,7 +244,11 @@ class SolarHeatmap extends HTMLElement {
     return tpl(dict[key], vars);
   }
 
-  _unit() {
+  _isCost() {
+    return this._mode === "cost";
+  }
+
+  _energyUnit() {
     return (
       this._config.unit ||
       this._hass?.states?.[this._config.entity]?.attributes?.unit_of_measurement ||
@@ -240,12 +256,35 @@ class SolarHeatmap extends HTMLElement {
     );
   }
 
+  _priceUnit() {
+    return String(this._hass?.states?.[this._config.price_entity]?.attributes?.unit_of_measurement || "");
+  }
+
+  // price in cents -> euros
+  _priceFactor() {
+    return /^c(t|ent)/i.test(this._priceUnit()) ? 0.01 : 1;
+  }
+
+  _currency() {
+    if (this._config.currency) return this._config.currency;
+    const u = this._priceUnit().split("/")[0].trim();
+    return !u || /^c(t|ent)/i.test(u) ? "€" : u;
+  }
+
+  _unit() {
+    return this._isCost() ? this._currency() : this._energyUnit();
+  }
+
+  _dec() {
+    return this._isCost() ? this._config.cost_decimals ?? 2 : this._config.decimals;
+  }
+
   _fmt(v) {
-    const d = this._config.decimals;
+    const d = this._dec();
     return `${v.toLocaleString(this._lang(), { minimumFractionDigits: d, maximumFractionDigits: d })} ${this._unit()}`;
   }
 
-  /* ---------- Aufbau des Rahmens ---------- */
+  /* ---------- Build the frame ---------- */
   _build() {
     const root = this.shadowRoot || this.attachShadow({ mode: "open" });
     root.innerHTML = `
@@ -287,6 +326,16 @@ class SolarHeatmap extends HTMLElement {
         .cell.sel { outline: 2px solid var(--primary-color); outline-offset: 1px; }
         .info.hover, .info.max { margin-top: 4px; }
         .info.cnt { margin: -6px 0 12px; min-height: 0; }
+        .tip { position: fixed; z-index: 10; display: none; pointer-events: none; padding: 8px 10px;
+               border-radius: 8px; font-size: 13px; line-height: 1.45; white-space: nowrap;
+               background: var(--card-background-color, #fff); color: var(--primary-text-color);
+               border: 1px solid var(--divider-color); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35); }
+        .tip b { display: block; margin-bottom: 2px; }
+        .tip .muted { color: var(--secondary-text-color); }
+        .mode { display: inline-flex; border: 1px solid var(--divider-color); border-radius: 6px; overflow: hidden; }
+        .mode button { padding: 7px 12px; font: inherit; font-size: 14px; border: 0; cursor: pointer;
+                       background: var(--card-background-color); color: var(--primary-text-color); }
+        .mode button.active { background: var(--primary-color); color: var(--text-primary-color, #fff); }
         .cell.big { height: 56px; display: flex; align-items: center; justify-content: center;
                     font-size: 13px; font-weight: 500; }
         .info { margin-top: 12px; min-height: 18px; font-size: 13px; color: var(--secondary-text-color); }
@@ -298,6 +347,7 @@ class SolarHeatmap extends HTMLElement {
         <div class="controls">
           <select class="view" aria-label="${this._t("aria_view")}"></select>
           <select class="period" aria-label="${this._t("aria_period")}"></select>
+          <div class="mode" style="display:none" title="${this._t("mode_hint")}"><button type="button" data-m="kwh"></button><button type="button" data-m="cost"></button></div>
           <div class="slider">
             <div class="range">
               <div class="track"><div class="fill"></div></div>
@@ -312,6 +362,7 @@ class SolarHeatmap extends HTMLElement {
         <div class="info sum"></div>
         <div class="info max"></div>
         <div class="info hover"></div>
+        <div class="tip"></div>
       </ha-card>`;
     this._root = root;
     const titleEl = root.querySelector(".title");
@@ -319,6 +370,11 @@ class SolarHeatmap extends HTMLElement {
     titleEl.style.display = this._config.title ? "" : "none";
     this._viewSelect = root.querySelector("select.view");
     this._select = root.querySelector("select.period");
+    this._tipEl = root.querySelector(".tip");
+    this._modeBox = root.querySelector(".mode");
+    this._modeBox.querySelectorAll("button").forEach((b) =>
+      b.addEventListener("click", () => this._setMode(b.dataset.m))
+    );
     this._loInput = root.querySelector("input.lo");
     this._hiInput = root.querySelector("input.hi");
     this._fill = root.querySelector(".fill");
@@ -437,7 +493,7 @@ class SolarHeatmap extends HTMLElement {
     this._viewSelect.value = this._view;
   }
 
-  /* ---------- Plan: Zeilen, Spalten, Zeitraum ---------- */
+  /* ---------- Plan: rows, columns, period ---------- */
   _makePlan() {
     const c = this._config;
     const lang = this._lang();
@@ -537,7 +593,7 @@ class SolarHeatmap extends HTMLElement {
       plan.start = new Date(y0, 0, 1);
       plan.end = new Date(now.getFullYear() + 1, 0, 1);
     } else {
-      // hourly: Tage x Stunden
+      // hourly: days x hours
       plan.period = "hour";
       plan.keyFn = kHour;
       plan.cols = 24;
@@ -572,39 +628,96 @@ class SolarHeatmap extends HTMLElement {
     return plan;
   }
 
-  /* ---------- Daten laden ---------- */
+  /* ---------- Load data ---------- */
   async _load() {
     const c = this._config;
     this._lastLoad = Date.now();
     if (this._earliestPromise) await this._earliestPromise;
     const plan = this._makePlan();
     const reqId = (this._req = (this._req || 0) + 1);
+    const hasPrice = !!c.price_entity;
+    // with a price entity we always read hourly/daily values and sum up to the view's cells
+    const period = hasPrice ? (this._view === "hourly" ? "hour" : "day") : plan.period;
     try {
       const res = await this._hass.callWS({
         type: "recorder/statistics_during_period",
         start_time: plan.start.toISOString(),
         end_time: plan.end.toISOString(),
-        statistic_ids: [c.entity],
-        period: plan.period,
+        statistic_ids: hasPrice ? [c.entity, c.price_entity] : [c.entity],
+        period,
         types: ["change", "max", "mean", "sum"],
       });
       if (reqId !== this._req) return;
       const rows = res[c.entity] || [];
       const keyFn = plan.keyFn;
-      const map = new Map();
+      const kwh = new Map();
+      const cost = new Map();
+
+      // price history (mean per hour/day); before the first known price the first one is used,
+      // without any statistics the current state of the price entity is used
+      let priceAt = () => null;
+      if (hasPrice) {
+        const f = this._priceFactor();
+        const pr = (res[c.price_entity] || [])
+          .map((r) => ({ t: new Date(r.start).getTime(), p: r.mean ?? r.max ?? r.min ?? r.state }))
+          .filter((x) => x.p != null)
+          .sort((x, y) => x.t - y.t);
+        const cur = parseFloat(this._hass.states[c.price_entity]?.state);
+        const fallback = Number.isFinite(cur) ? cur : null;
+        let i = 0;
+        let p = pr.length ? pr[0].p : fallback;
+        priceAt = (ts) => {
+          while (i < pr.length && pr[i].t <= ts) { p = pr[i].p; i++; }
+          return p == null ? null : p * f;
+        };
+      }
+
+      let priced = false;
       for (const r of rows) {
         const d = new Date(r.start);
         const v = c.stat === "auto" ? (r.change ?? r.max ?? r.mean) : r[c.stat];
         if (v == null) continue;
-        map.set(keyFn(d), (map.get(keyFn(d)) || 0) + v);
+        const k = keyFn(d);
+        kwh.set(k, (kwh.get(k) || 0) + v);
+        if (hasPrice) {
+          const price = priceAt(d.getTime());
+          if (price != null) {
+            priced = true;
+            cost.set(k, (cost.get(k) || 0) + v * price);
+          }
+        }
       }
       this._plan = plan;
-      this._values = map;
+      this._valuesKwh = kwh;
+      this._valuesCost = cost;
+      this._costOk = hasPrice && priced;
+      if (!this._costOk) this._mode = "kwh";
+      this._values = this._isCost() ? cost : kwh;
       this._empty = rows.length === 0;
+      this._updateModeButtons(hasPrice);
       this._renderGrid();
     } catch (e) {
       this._grid.innerHTML = `<div class="msg err">${this._t("load_error", { msg: e.message || e })}</div>`;
     }
+  }
+
+  _updateModeButtons(hasPrice) {
+    const [bk, bc] = this._modeBox.querySelectorAll("button");
+    bk.textContent = this._energyUnit();
+    bc.textContent = this._currency();
+    bk.classList.toggle("active", !this._isCost());
+    bc.classList.toggle("active", this._isCost());
+    this._modeBox.style.display = hasPrice && this._costOk ? "" : "none";
+  }
+
+  _setMode(m) {
+    if (m === this._mode || (m === "cost" && !this._costOk)) return;
+    this._mode = m;
+    this._values = this._isCost() ? this._valuesCost : this._valuesKwh;
+    this._fLo = 0;
+    this._fHi = 1000;
+    this._updateModeButtons(true);
+    this._renderGrid();
   }
 
   _labelStep() {
@@ -616,13 +729,14 @@ class SolarHeatmap extends HTMLElement {
     return per < 13 ? 3 : per < 21 ? 2 : 1;
   }
 
-  /* ---------- Raster zeichnen ---------- */
+  /* ---------- Draw the grid ---------- */
   _renderGrid() {
     const plan = this._plan;
     const g = this._grid;
     const colMax = plan.view === "yearly" ? "130px" : "1fr";
     g.style.gridTemplateColumns = `${LABEL_W}px repeat(${plan.cols}, minmax(0, ${colMax}))`;
     g.innerHTML = "";
+    this._tipHide();
     this._cells = [];
     this._selCell = null;
     this._hover.textContent = "";
@@ -656,16 +770,31 @@ class SolarHeatmap extends HTMLElement {
             el.classList.add("on");
             el._value = v;
             el._tip = cell.tip;
+            el._key = cell.key;
             sum += v;
             count++;
             if (v > max) { max = v; maxTip = cell.tip; }
             if (plan.view === "yearly") { el.textContent = this._fmt(v); el._text = true; }
-            el.addEventListener("mouseenter", () => this._show(el));
-            el.addEventListener("click", () => {
+            el.addEventListener("pointerenter", (ev) => {
+              this._show(el);
+              if (ev.pointerType !== "touch") this._tipShow(el, ev);
+            });
+            el.addEventListener("pointermove", (ev) => {
+              if (ev.pointerType !== "touch") this._tipMove(ev);
+            });
+            el.addEventListener("pointerleave", () => this._tipHide());
+            el.addEventListener("click", (ev) => {
               this._cells.forEach((x) => x.classList.remove("sel"));
               el.classList.add("sel");
               this._selCell = el;
               this._show(el);
+              if (ev.pointerType === "touch") {
+                // no hover on touch screens: show the tooltip above the tapped cell for a moment
+                const r = el.getBoundingClientRect();
+                this._tipShow(el, { clientX: r.left + r.width / 2, clientY: r.top - 40 });
+                clearTimeout(this._tipTimer);
+                this._tipTimer = setTimeout(() => this._tipHide(), 3000);
+              }
             });
           }
         }
@@ -674,7 +803,7 @@ class SolarHeatmap extends HTMLElement {
       }
     }
 
-    this._max = this._config.max ?? max;
+    this._max = (this._isCost() ? null : this._config.max) ?? max;
     this._syncRange();
 
     const perKey = { daily: "day", weekly: "day", monthly: "month", yearly: "year" }[plan.view];
@@ -683,6 +812,9 @@ class SolarHeatmap extends HTMLElement {
       ? ""
       : this._t("total", { v: this._fmt(sum) }) + (per && count > 1 ? this._t("avg", { v: this._fmt(sum / count), per }) : "");
 
+    if (this._config.price_entity && !this._costOk && !this._empty) {
+      this._hover.textContent = this._t("no_price");
+    }
     if (this._empty) {
       this._info.innerHTML = this._t("no_stats");
     } else if (max > 0) {
@@ -695,13 +827,95 @@ class SolarHeatmap extends HTMLElement {
     this._paint();
   }
 
+  _fmtKwh(v) {
+    const d = this._config.decimals;
+    return `${v.toLocaleString(this._lang(), { minimumFractionDigits: d, maximumFractionDigits: d })} ${this._energyUnit()}`;
+  }
+
+  _fmtCost(v) {
+    const d = this._config.cost_decimals ?? 2;
+    return `${v.toLocaleString(this._lang(), { minimumFractionDigits: d, maximumFractionDigits: d })} ${this._currency()}`;
+  }
+
+  _fmtPrice(v) {
+    const n = v.toLocaleString(this._lang(), { minimumFractionDigits: 2, maximumFractionDigits: 3 });
+    return `${n} ${this._currency()}/${this._energyUnit()}`;
+  }
+
+  // consumption, cost and (average) price of one cell, independent of the selected mode
+  _detail(el) {
+    const kwh = this._valuesKwh?.get(el._key) ?? el._value;
+    let cost = null;
+    let price = null;
+    if (this._costOk) {
+      const c = this._valuesCost?.get(el._key);
+      if (c != null) {
+        cost = c;
+        if (kwh > 0) price = c / kwh;
+      }
+    }
+    const avg = this._plan.view === "monthly" || this._plan.view === "yearly";
+    return { kwh, cost, price, avg };
+  }
+
   _show(el) {
+    const d = this._detail(el);
+    let txt;
+    if (d.cost != null) {
+      txt = d.price != null
+        ? `${this._fmtKwh(d.kwh)} × ${d.avg ? "Ø " : ""}${this._fmtPrice(d.price)} = ${this._fmtCost(d.cost)}`
+        : `${this._fmtKwh(d.kwh)} · ${this._fmtCost(d.cost)}`;
+    } else {
+      txt = this._fmtKwh(d.kwh);
+    }
     const suf = el._pos === "below" ? ` (${this._t("out_below")})` : el._pos === "above" ? ` (${this._t("out_above")})` : "";
-    this._hover.textContent = `${el._tip}: ${this._fmt(el._value)}${suf}`;
+    this._hover.textContent = `${el._tip}: ${txt}${suf}`;
+  }
+
+  _tipShow(el, ev) {
+    if (this._config.show_tooltip === false) return;
+    const t = this._tipEl;
+    t.textContent = "";
+    const d = this._detail(el);
+    const head = document.createElement("b");
+    head.textContent = el._tip;
+    t.appendChild(head);
+    const line = (txt, cls) => {
+      const e = document.createElement("div");
+      e.textContent = txt;
+      if (cls) e.className = cls;
+      t.appendChild(e);
+    };
+    line(this._fmtKwh(d.kwh));
+    if (d.cost != null) {
+      line(d.price != null ? `${this._fmtCost(d.cost)}  ·  ${d.avg ? "Ø " : ""}${this._fmtPrice(d.price)}` : this._fmtCost(d.cost));
+    }
+    if (el._pos === "below") line(this._t("out_below"), "muted");
+    if (el._pos === "above") line(this._t("out_above"), "muted");
+    t.style.display = "block";
+    this._tipMove(ev);
+  }
+
+  _tipMove(ev) {
+    const t = this._tipEl;
+    if (t.style.display !== "block") return;
+    const pad = 14;
+    const w = t.offsetWidth;
+    const h = t.offsetHeight;
+    let x = ev.clientX + pad;
+    let y = ev.clientY + pad;
+    if (x + w > window.innerWidth - 8) x = ev.clientX - w - pad;
+    if (y + h > window.innerHeight - 8) y = ev.clientY - h - pad;
+    t.style.left = `${Math.max(8, x)}px`;
+    t.style.top = `${Math.max(8, y)}px`;
+  }
+
+  _tipHide() {
+    if (this._tipEl) this._tipEl.style.display = "none";
   }
 
   _num(v) {
-    const d = this._config.decimals;
+    const d = this._dec();
     return v.toLocaleString(this._lang(), { minimumFractionDigits: d, maximumFractionDigits: d });
   }
 
@@ -796,7 +1010,7 @@ class SolarHeatmap extends HTMLElement {
 }
 
 /* ------------------------------------------------------------------ */
-/* Visueller Editor                                                    */
+/* Visual editor                                                      */
 /* ------------------------------------------------------------------ */
 function editorSchema(lang) {
   const o = I18N[lang].opts;
@@ -823,6 +1037,8 @@ function editorSchema(lang) {
         { name: "unit", selector: { text: {} } },
       ],
     },
+    { name: "price_entity", selector: { entity: { domain: ["sensor", "input_number"] } } },
+    { name: "currency", selector: { text: {} } },
     { name: "rows", selector: { number: { min: 1, max: 60, mode: "box" } } },
     {
       name: "stat",
@@ -835,6 +1051,7 @@ function editorSchema(lang) {
       ]),
     },
     { name: "show_view_select", selector: { boolean: {} } },
+    { name: "show_tooltip", selector: { boolean: {} } },
     { name: "newest_first", selector: { boolean: {} } },
     {
       name: "language",
@@ -887,6 +1104,7 @@ class SolarHeatmapEditor extends HTMLElement {
       stat: "auto",
       newest_first: false,
       show_view_select: true,
+      show_tooltip: true,
       ...this._config,
       color: hexToRgb(this._config.color || DEFAULT_COLOR),
     };
